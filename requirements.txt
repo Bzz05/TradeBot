@@ -13,6 +13,7 @@ kafka-python
 redis
 pytz
 tqdm
-univorn
+uvicorn
 fastapi
 pydantic
+websockets
