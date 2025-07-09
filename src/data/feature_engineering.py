@@ -149,7 +149,7 @@ class FeatureEngineer:
             # select only calculated indicators from support df
             feature_cols_from_support = []
             for col in df_support.columns:
-                if f"_{support_tf_str_key}" in col: # MUSR have the correct suffix
+                if f"_{support_tf_str_key}" in col: # MUST have the correct suffix
                     is_basic_ohlcv_derivative = False
                     for prefix in ohlcv_candle_calc_prefixes_to_exclude:
                         # check if the column name starts with one of these prefixes

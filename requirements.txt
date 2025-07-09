@@ -16,3 +16,4 @@ tqdm
 uvicorn
 fastapi
 pydantic
+httpx

@@ -65,8 +65,8 @@ class BinanceDataScraper:
         return df
 
     def save_data_to_disk(self, data, data_type, symbol, timeframe):
-        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
-        filename = f"{symbol}_{timeframe}_{timestamp}.csv"
+        # timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+        filename = f"{symbol}_{timeframe}.csv"
         directory = os.path.join("data", data_type)
         os.makedirs(directory, exist_ok=True)
         filepath = os.path.join(directory, filename)
@@ -94,13 +94,13 @@ async def main():
     symbol = "BTCUSDT" # set this urself
     intervals = ["5m", "15m", "1h"] # this too
     start_time = datetime(2019, 9, 1)
-    end_time = datetime(2025, 3, 24)
+    end_time = datetime(2025, 7, 1)  
     
     for interval in intervals:
         klines = await scraper.fetch_historical_klines(symbol, interval, start_time, end_time)
         
         # save the df
-        output_directory = "data/historical_raw"
+        output_directory = "data/historical_raw/BTCUSDT"
         os.makedirs(output_directory, exist_ok=True)
         output_path = os.path.join(output_directory, f"klines_{interval}.csv")
         

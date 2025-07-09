@@ -1,7 +1,18 @@
 # main config
 
 # API settings
-api_url: "https://testnet.binancefuture.com"  # testnet 4 futures
+# api_url: "https://testnet.binancefuture.com"  # testnet 4 futures
+api_url: "https://fapi.binance.com"
+project_root: "."
+
+kafka:
+  bootstrap_servers: "localhost:9092"
+  topic_market_data_prefix: "market.data.raw."
+
+producer:
+  symbols_to_fetch: ["BTCUSDT"]
+  save_to_disk: true
+  save_batch_size: 1
 
 data_paths:
   raw_data_directory: "data/historical_raw"
@@ -44,9 +55,9 @@ environment:
   trade_penalty_ratio: .00001    
   bankruptcy_penalty: -1.0
   # Risk Management
-  stop_loss_pct: .05             
+  stop_loss_pct: .075             
   short_sell_margin_floor_pct: .2
-  position_size_fractions: [.125, .25] 
+  position_size_fractions: [.125, .25]
   # Market Mechanics
   slippage_factor_per_1k_value: .00001 
   # Reward Shaping
@@ -87,3 +98,9 @@ training_loop:
 device: "auto"
 
 log_level: "INFO"
+
+llm:
+  provider: "ollama"
+  ollama_api_url: "http://localhost:11434/api/chat"
+  ollama_model_name: "tinyllama"
+  explanation_prompt_template: "config/prompt_templates/explain_rl_decision.txt"
