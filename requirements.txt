@@ -1,6 +1,6 @@
 torch
 pandas
-numpy
+numpy==1.23.5
 pandas-ta
 joblib
 PyYAML
@@ -17,3 +17,4 @@ uvicorn
 fastapi
 pydantic
 httpx
+websocket-client

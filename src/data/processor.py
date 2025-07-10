@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import os
 import logging
 import yaml
@@ -23,6 +24,7 @@ class DataProcessor:
 
         data_paths_config = self.config.get('data_paths', {})
         dp_config = self.config.get('data_processing', {})
+        self.indicators_config = self.config['feature_engineering']['indicators']
 
         self.raw_dir = data_paths_config.get("raw_data_directory", "data/historical_raw")
         self.processed_dir = data_paths_config.get("processed_data_directory", "data/historical_processed")
@@ -37,6 +39,12 @@ class DataProcessor:
         self.primary_timeframe_config = dp_config.get("primary_timeframe", "15m")
         self.feature_engineer_timeframes = dp_config.get("feature_engineer_timeframes", ["1h", "15m", "5m"])
 
+        self.scaler_params = joblib.load(self.scaler_params_path_config)
+        logging.info(f"Loaded pre-trained scaler parameters from {self.scaler_params_path_config}")
+
+        self.scaler_colnames = joblib.load(self.scaler_colnames_path_config)
+        logging.info(f"Loaded pre-trained scaler column names from {self.scaler_colnames_path_config}")
+
         for pth_val in [self.raw_dir, self.processed_dir, 
                         os.path.dirname(self.features_path_config), 
                         os.path.dirname(self.scaler_params_path_config), 
@@ -45,6 +53,108 @@ class DataProcessor:
         
         self.feature_engineer = FeatureEngineer(config_path)
         logging.info("DataProcessor initialized.")
+
+    def _apply_indicators(self, df: pd.DataFrame, timeframe: str):
+        df_feat = df.copy()
+        if 'Timestamp' in df_feat.columns:
+            # This warning you see is also a clue that the initial string->datetime parsing is ambiguous.
+            # Specifying the format can make it more robust.
+            df_feat['Timestamp'] = pd.to_datetime(df_feat['Timestamp'], utc=True, errors='coerce')
+        
+            df_feat.dropna(subset=['Timestamp'], inplace=True)
+                
+            df_feat = df_feat.set_index('Timestamp').sort_index()
+
+        for indicator_cfg in self.indicators_config:
+            try:
+                name, params, on_col = indicator_cfg['name'].upper(), indicator_cfg.get('params', {}), indicator_cfg.get('on_column', 'Close')
+                if on_col not in df_feat.columns: continue
+
+                if hasattr(df_feat.ta, name.lower()):
+                    indicator_func = getattr(df_feat.ta, name.lower())
+                    result = indicator_func(close=df_feat[on_col], high=df_feat.get('High'), low=df_feat.get('Low'), volume=df_feat.get('Volume'), **params, append=False)
+                    if isinstance(result, pd.DataFrame):
+                        for col in result.columns:
+                            clean_col = col.replace(f'_{params.get("length", "")}_{params.get("std", "")}.0', '').replace('BBM','BB_middle').replace('BBU','BB_upper').replace('BBL','BB_lower').replace('BBB','BBW').replace('BBP','BBP')
+                            df_feat[f"{clean_col}_{timeframe}"] = result[col]
+                    else:
+                        col_name = indicator_cfg.get('output_name_override') or f"{name}_{params.get('length', '')}"
+                        df_feat[f"{col_name}_{timeframe}"] = result
+                elif name == "PCT_CHANGE":
+                    col_name = indicator_cfg.get('output_name_override') or f"PCT_CHANGE_{params.get('periods', 1)}"
+                    df_feat[f"{col_name}_{timeframe}"] = df_feat[on_col].pct_change(**params).replace([np.inf, -np.inf], np.nan)
+            except Exception as e:
+                # Corrected logging call
+                logging.error(f"Error calculating {indicator_cfg.get('name')} for {timeframe}: {e}")
+        
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+            if col in df_feat.columns: df_feat.rename(columns={col: f"{col}_{timeframe}"}, inplace=True)
+
+        df_feat.reset_index(inplace=True)
+        return df_feat
+
+    def process_live_data(self, raw_data_dict: dict):
+        featured_dfs = {tf: self._apply_indicators(df_raw, tf) for tf, df_raw in raw_data_dict.items() if not df_raw.empty}
+        if self.primary_timeframe_config not in featured_dfs or featured_dfs[self.primary_timeframe_config].empty:
+            raise ValueError("Primary timeframe data could not be processed for live inference.")
+
+        df_primary = featured_dfs[self.primary_timeframe_config].set_index("Timestamp").sort_index()
+        df_aligned = df_primary.copy()
+
+        for tf, df_support in featured_dfs.items():
+            if tf == self.primary_timeframe_config: continue
+            support_features = [c for c in df_support.columns if f"_{tf}" in c and not any(o in c for o in ['Open_', 'High_', 'Low_', 'Close_', 'Volume_'])]
+            if not support_features: continue
+            df_aligned = pd.merge_asof(df_aligned, df_support[['Timestamp'] + support_features].set_index('Timestamp').sort_index(), left_index=True, right_index=True, direction='backward')
+
+        unscaled_df = df_aligned.copy().reset_index()
+        df_aligned.bfill(inplace=True)
+        df_aligned.ffill(inplace=True)
+        df_aligned.dropna(inplace=True)
+
+        if df_aligned.empty:
+            return None, None # Return None to prevent the ambiguous ValueError
+
+        # Ensure all required columns for scaling are present
+        for col in self.scaler_colnames:
+            if col not in df_aligned.columns:
+                df_aligned[col] = 0
+
+        # --- FIX STARTS HERE: Corrected Scaling Logic ---
+        cols_to_transform = [col for col in self.scaler_colnames if col in df_aligned.columns]
+        if cols_to_transform:
+            # Loop through each column that needs to be scaled
+            for col in cols_to_transform:
+                try:
+                    # 1. Find the numerical index (position) of the column
+                    idx = self.scaler_colnames.index(col)
+
+                    # 2. Use that index to get the specific parameter dict for that column
+                    params_for_col = self.scaler_params.get(idx)
+
+                    if params_for_col:
+                        mean = params_for_col.get('mean')
+                        std = params_for_col.get('std')
+
+                        # 3. Apply the scaling formula
+                        if mean is not None and std is not None and std != 0:
+                            df_aligned[col] = (df_aligned[col] - mean) / std
+                        else:
+                            logging.warning(f"Invalid parameters for column '{col}'. Scaling skipped.")
+                    else:
+                        logging.warning(f"No parameters found for column '{col}' at index {idx}. Scaling skipped.")
+
+                except (ValueError, IndexError):
+                    logging.warning(f"Column '{col}' not in scaler's column list. Scaling skipped.")
+        # --- FIX ENDS HERE ---
+
+        df_aligned_out = df_aligned.reset_index()
+
+        time_format = '%Y-%m-%d %H:%M:%S'
+        df_aligned_out['Timestamp'] = df_aligned_out['Timestamp'].dt.strftime(time_format)
+        unscaled_df['Timestamp'] = unscaled_df['Timestamp'].dt.strftime(time_format)
+
+        return df_aligned_out, unscaled_df
 
     def load_raw_data(self, filename):
         filepath = os.path.join(self.raw_dir, filename)
@@ -96,16 +206,12 @@ class DataProcessor:
 
         df_final = df_final.sort_values("Timestamp").reset_index(drop=True)
 
-        # The price column needed by the environment (e.g., "Close_15m" or "Close")
-        # must be present in df_final at this point.
-        price_col_for_env = f"Close_{primary_tf_str}" # Standardize how price column is named
+        price_col_for_env = f"Close_{primary_tf_str}"
         if price_col_for_env not in df_final.columns:
-            # Fallback if primary_tf_str was not appended by FeatureEngineer (e.g. if it's a generic 'Close')
             if "Close" in df_final.columns:
                 price_col_for_env = "Close" 
             else:
                 logging.error(f"Critical: Price column '{price_col_for_env}' (and fallback 'Close') not found in df_final after feature engineering.")
-                # Attempt to find any 'Close_<tf>' column
                 potential_price_cols = [col for col in df_final.columns if col.startswith("Close_")]
                 if potential_price_cols:
                     price_col_for_env = potential_price_cols[0]
@@ -120,7 +226,6 @@ class DataProcessor:
 
         if final_agent_features_list:
             try:
-                # Use the attribute defined in __init__
                 with open(self.features_path_config, 'w') as f:
                     json.dump(final_agent_features_list, f, indent=4)
                 logging.info(f"Agent features list saved to {self.features_path_config} ({len(final_agent_features_list)} features).")
@@ -242,7 +347,7 @@ class DataProcessor:
                 return df
             
             ordered_cols = []
-            # 1. Timestamp
+            # 1. Timestamp  
             if "Timestamp" in df.columns:
                 ordered_cols.append("Timestamp")
             
